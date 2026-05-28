@@ -17,6 +17,8 @@ Nonebot-Icewater661-YingIceCore/
 ├─ ying_point.csv
 └─ yingice/
    └─ plugins/
+      ├─ jrcp/
+      │  └─ __init__.py
       ├─ pat_head/
       │  └─ __init__.py
       ├─ ying_permission/
@@ -48,6 +50,33 @@ plugin_dirs = ["yingice/plugins"]
 ```
 
 ## 插件与指令
+
+### jrcp
+
+群聊今日 CP 插件。
+
+指令：
+
+```text
+。jrcp
+.jrcp
+!jrcp
+```
+
+功能：
+
+- 仅在群聊中触发。
+- 自动查询当前群成员列表。
+- 以当前日期和群号为随机种子生成当日配对。
+- 群成员数为偶数时，bot 自己也参与配对。
+- 群成员数为单数时，bot 自己不计入配对池。
+- 回复当前用户的今日 CP 头像和 QQ 号。
+
+回复格式：
+
+```text
+xxx（用户ID）的今日cp为：另一名群成员（另一名群成员ID）【另一名群成员的头像】
+```
 
 ### ying_point_system
 
