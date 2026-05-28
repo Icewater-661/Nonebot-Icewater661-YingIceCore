@@ -8,6 +8,7 @@ from nonebot.adapters.onebot.v11 import Bot, MessageEvent  # noqa: TC002
 from nonebot.plugin import PluginMetadata
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_README_FILE = Path(__file__).resolve().parents[3] / "README.md"
 DEFAULT_HELP_FILE = Path(__file__).with_name("default_help.txt")
 README_FILE_NAME = "README.md"
 COMMAND_PREFIX = "help"
@@ -15,7 +16,8 @@ COMMAND_ALIASES = ("help", "帮助")
 MARKDOWN_HEADING_PREFIX = "#"
 MARKDOWN_LIST_PREFIXES = ("- ", "* ")
 MARKDOWN_FENCE_PREFIX = "```"
-DISPLAY_NAME_SEPARATOR_PATTERN = r"[。.!！?？；;，,]"
+PLUGIN_LIST_TITLE = "插件列表"
+MARKDOWN_LINK_PATTERN = r"\[([^\]]+)\]\([^)]+\)"
 
 __plugin_meta__ = PluginMetadata(
     name="help",
@@ -52,50 +54,6 @@ def _get_plugin_readme(plugin_name: str) -> Path | None:
     return None
 
 
-def _list_plugins() -> list[str]:
-    plugin_names: list[str] = []
-    for plugin_dir in sorted(PLUGIN_ROOT.iterdir(), key=lambda path: path.name):
-        if not plugin_dir.is_dir() or plugin_dir.name.startswith("_"):
-            continue
-        if (plugin_dir / README_FILE_NAME).exists():
-            plugin_names.append(plugin_dir.name)
-
-    return plugin_names
-
-
-def _get_readme_title(markdown: str) -> str:
-    for line in markdown.splitlines():
-        stripped_line = line.strip()
-        if stripped_line.startswith("# "):
-            return stripped_line.removeprefix("# ").strip()
-
-    return ""
-
-
-def _shorten_display_name(text: str) -> str:
-    parts = re.split(DISPLAY_NAME_SEPARATOR_PATTERN, text, maxsplit=1)
-    return parts[0].strip()
-
-
-def _get_plugin_display_name(plugin_name: str) -> str:
-    readme_path = _get_plugin_readme(plugin_name)
-    if readme_path is None:
-        return plugin_name
-
-    markdown = readme_path.read_text(encoding="utf-8")
-    title = _get_readme_title(markdown)
-    if title and title != plugin_name:
-        return title
-
-    description = _extract_section(markdown, "插件描述")
-    for line in description.splitlines():
-        stripped_line = line.strip()
-        if stripped_line:
-            return _shorten_display_name(stripped_line)
-
-    return plugin_name
-
-
 def _extract_section(markdown: str, title: str) -> str:
     lines = markdown.splitlines()
     start_index: int | None = None
@@ -119,6 +77,7 @@ def _extract_section(markdown: str, title: str) -> str:
 
 def _strip_markdown_line(line: str) -> str:
     stripped_line = line.strip()
+    stripped_line = re.sub(MARKDOWN_LINK_PATTERN, r"\1", stripped_line)
     while stripped_line.startswith(MARKDOWN_HEADING_PREFIX):
         stripped_line = stripped_line[1:].strip()
 
@@ -141,17 +100,21 @@ def _clean_markdown_text(text: str) -> str:
     return "\n".join(cleaned_lines)
 
 
-def _build_default_reply() -> str:
-    plugin_names = _list_plugins()
-    plugin_list = "\n".join(
-        f"- {plugin_name}：{_get_plugin_display_name(plugin_name)}"
-        for plugin_name in plugin_names
-    )
-    if not plugin_list:
-        plugin_list = "暂无可查询插件。"
+def _read_project_plugin_list() -> str:
+    if not PROJECT_README_FILE.exists():
+        return "暂无可查询插件。"
 
+    markdown = PROJECT_README_FILE.read_text(encoding="utf-8")
+    plugin_list = _extract_section(markdown, PLUGIN_LIST_TITLE)
+    if not plugin_list:
+        return "暂无可查询插件。"
+
+    return plugin_list
+
+
+def _build_default_reply() -> str:
     return _clean_markdown_text(
-        f"{_read_default_help()}\n当前插件列表：\n{plugin_list}"
+        f"{_read_default_help()}\n当前插件列表：\n{_read_project_plugin_list()}"
     )
 
 
