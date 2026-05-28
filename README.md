@@ -21,6 +21,10 @@ Nonebot-Icewater661-YingIceCore/
       │  ├─ __init__.py
       │  ├─ README.md
       │  └─ feedlist.csv
+      ├─ help/
+      │  ├─ __init__.py
+      │  ├─ README.md
+      │  └─ default_help.txt
       ├─ jrcp/
       │  ├─ __init__.py
       │  └─ README.md
@@ -47,6 +51,7 @@ Nonebot-Icewater661-YingIceCore/
 ## 插件列表
 
 - [feed](yingice/plugins/feed/README.md)：投喂互动插件。
+- [help](yingice/plugins/help/README.md)：帮助查询插件。
 - [jrcp](yingice/plugins/jrcp/README.md)：群聊今日 CP 插件。
 - [pat_head](yingice/plugins/pat_head/README.md)：摸头互动插件。
 - [ying_permission](yingice/plugins/ying_permission/README.md)：权限管理插件。

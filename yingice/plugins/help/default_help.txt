@@ -1,0 +1,5 @@
+这里是冰莹的帮助菜单，实现了一些自定义功能。
+发送 @bot help 插件名称 或 @bot 帮助 插件名称 可以查看某个插件的详细说明。
+另外，发送.help可以搜索骰娘相关指令的相关帮助
+bot项目地址：github.com/Icewater-661/Nonebot-Icewater661-YingIceCore
+任何问题请咨询master冰水（QQ:308217149）
