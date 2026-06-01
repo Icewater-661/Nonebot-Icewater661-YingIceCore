@@ -31,6 +31,11 @@ Nonebot-Icewater661-YingIceCore/
       ├─ pat_head/
       │  ├─ __init__.py
       │  └─ README.md
+      ├─ todo/
+      │  ├─ __init__.py
+      │  ├─ README.md
+      │  ├─ todo_data.json
+      │  └─ todo_group_config.json
       ├─ ying_permission/
       │  ├─ __init__.py
       │  ├─ README.md
@@ -54,6 +59,7 @@ Nonebot-Icewater661-YingIceCore/
 - [help](yingice/plugins/help/README.md)：帮助查询插件。
 - [jrcp](yingice/plugins/jrcp/README.md)：群聊今日 CP 插件。
 - [pat_head](yingice/plugins/pat_head/README.md)：摸头互动插件。
+- [todo](yingice/plugins/todo/README.md)：todo 提醒插件。
 - [ying_permission](yingice/plugins/ying_permission/README.md)：权限管理插件。
 - [ying_point_system](yingice/plugins/ying_point_system/README.md)：好感度系统插件。
 
