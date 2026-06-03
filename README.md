@@ -17,6 +17,11 @@ Nonebot-Icewater661-YingIceCore/
 ├─ ying_point.csv
 └─ yingice/
    └─ plugins/
+      ├─ bili_ying/
+      │  ├─ __init__.py
+      │  ├─ README.md
+      │  ├─ bili_ying_config.json
+      │  └─ bili_ying_subscriptions.json
       ├─ feed/
       │  ├─ __init__.py
       │  ├─ README.md
@@ -55,6 +60,7 @@ Nonebot-Icewater661-YingIceCore/
 
 ## 插件列表
 
+- [bili_ying](yingice/plugins/bili_ying/README.md)：Bilibili 直播订阅提醒插件。
 - [feed](yingice/plugins/feed/README.md)：投喂互动插件。
 - [help](yingice/plugins/help/README.md)：帮助查询插件。
 - [jrcp](yingice/plugins/jrcp/README.md)：群聊今日 CP 插件。

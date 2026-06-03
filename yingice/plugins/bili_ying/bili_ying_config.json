@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "cookie": "",
+  "check_interval_seconds": 120,
+  "check_batch_size": 10,
+  "check_cursor": 0,
+  "notify_admin_on_api_reset": true,
+  "last_api_reset_notice_at": 1780497084
+}
