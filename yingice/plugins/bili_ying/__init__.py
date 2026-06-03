@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,12 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from nonebot import get_bots, get_driver, on_message
-from nonebot.adapters.onebot.v11 import (  # noqa: TC002
+from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupMessageEvent,
+    Message,
     MessageEvent,
+    MessageSegment,
 )
 from nonebot.exception import ActionFailed
 from nonebot.plugin import PluginMetadata
@@ -23,6 +26,7 @@ BILI_CONFIG_FILE = Path(__file__).with_name("bili_ying_config.json")
 BILI_SUBSCRIPTION_FILE = Path(__file__).with_name("bili_ying_subscriptions.json")
 BILI_API_URL = "https://api.live.bilibili.com/room/v1/Room/get_info"
 BILI_MASTER_API_URL = "https://api.live.bilibili.com/live_user/v1/Master/info"
+BILI_VIDEO_API_URL = "https://api.bilibili.com/x/web-interface/view"
 CHECK_INTERVAL_SECONDS = 120
 MIN_CHECK_INTERVAL_SECONDS = 60
 CHECK_BATCH_SIZE = 10
@@ -35,6 +39,8 @@ COMMAND_PARTS_MIN = 2
 LIVE_STATUS_OFFLINE = 0
 LIVE_STATUS_LIVE = 1
 LIVE_STATUS_ROUND = 2
+BV_PATTERN = re.compile(r"(?i)\bBV[0-9A-Za-z]{10}\b")
+URL_PATTERN = re.compile(r"https?://[^\s\]\)）>]+")
 DEFAULT_CONFIG = {
     "enabled": True,
     "cookie": "",
@@ -52,6 +58,7 @@ __plugin_meta__ = PluginMetadata(
 )
 
 bili_ying = on_message(priority=10, block=False)
+bili_video = on_message(priority=11, block=False)
 _monitor_state: dict[str, asyncio.Task | None] = {"task": None}
 
 
@@ -223,6 +230,103 @@ def _fill_anchor_name(room_info: dict[str, Any], config: dict[str, Any]) -> None
 
 async def _fetch_room_info(room_id: str, config: dict[str, Any]) -> dict[str, Any]:
     return await asyncio.to_thread(_fetch_room_info_sync, room_id, config)
+
+
+def _is_bili_url(url: str) -> bool:
+    return "bilibili.com" in url or "b23.tv" in url
+
+
+def _clean_url(url: str) -> str:
+    return url.rstrip(".,，。!！?？;；:：")
+
+
+def _resolve_url_sync(url: str, config: dict[str, Any]) -> str:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 YingIceCore bili-ying",
+            "Referer": "https://www.bilibili.com/",
+        },
+    )
+    cookie = str(config.get("cookie", "")).strip()
+    if cookie:
+        request.add_header("Cookie", cookie)
+
+    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        return response.geturl()
+
+
+async def _resolve_url(url: str, config: dict[str, Any]) -> str:
+    return await asyncio.to_thread(_resolve_url_sync, url, config)
+
+
+async def _extract_bvid(text: str, config: dict[str, Any]) -> str | None:
+    matched = BV_PATTERN.search(text)
+    if matched:
+        return matched.group(0)
+
+    for raw_url in URL_PATTERN.findall(text):
+        url = _clean_url(raw_url)
+        if not _is_bili_url(url):
+            continue
+        matched = BV_PATTERN.search(url)
+        if matched:
+            return matched.group(0)
+        if "b23.tv" not in url:
+            continue
+        try:
+            resolved_url = await _resolve_url(url, config)
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            continue
+        matched = BV_PATTERN.search(resolved_url)
+        if matched:
+            return matched.group(0)
+
+    return None
+
+
+def _fetch_video_info_sync(bvid: str, config: dict[str, Any]) -> dict[str, Any]:
+    request = _build_request(BILI_VIDEO_API_URL, {"bvid": bvid}, config)
+    payload = _read_bili_payload(request)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise TypeError(API_ERROR)
+
+    return data
+
+
+async def _fetch_video_info(bvid: str, config: dict[str, Any]) -> dict[str, Any]:
+    return await asyncio.to_thread(_fetch_video_info_sync, bvid, config)
+
+
+def _thumbnail_cover_url(cover_url: str) -> str:
+    url = cover_url.strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = f"https:{url}"
+    if url.startswith("http://"):
+        url = f"https://{url.removeprefix('http://')}"
+
+    url = url.split("?", maxsplit=1)[0]
+    return f"{url}@320w_180h_1c.jpg"
+
+
+def _video_message(video_info: dict[str, Any], fallback_bvid: str) -> Message:
+    owner = video_info.get("owner")
+    title = str(video_info.get("title") or "未知标题")
+    bvid = str(video_info.get("bvid") or fallback_bvid)
+    cover_url = _thumbnail_cover_url(str(video_info.get("pic") or ""))
+    up_name = "未知 UP 主"
+    if isinstance(owner, dict) and owner.get("name"):
+        up_name = str(owner["name"])
+
+    message = Message(f"视频名称：{title}\nBV号：{bvid}\nUP主：{up_name}")
+    if cover_url:
+        message += MessageSegment.text("\n")
+        message += MessageSegment.image(file=cover_url, cache=False)
+
+    return message
 
 
 def _is_api_reset_error(error: BaseException) -> bool:
@@ -432,6 +536,30 @@ def _list_rooms(group_id: int) -> str:
     lines = ["当前群 Bilibili 直播订阅："]
     lines.extend(_room_display(entry) for entry in rooms.values())
     return "\n".join(lines)
+
+
+@bili_video.handle()
+async def handle_bili_video(bot: Bot, event: GroupMessageEvent) -> None:
+    config = _read_config()
+    bvid = await _extract_bvid(str(event.message), config)
+    if not bvid:
+        return
+
+    try:
+        video_info = await _fetch_video_info(bvid, config)
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        if _is_api_reset_error(exc):
+            await _notify_api_reset(bot, exc, bvid)
+        return
+
+    await bili_video.finish(_video_message(video_info, bvid))
 
 
 @bili_ying.handle()
