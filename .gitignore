@@ -140,3 +140,4 @@ dmypy.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 yingice/plugins/bili_ying/bili_ying_subscriptions.json
+yingice/plugins/bili_ying/bili_ying_config.json
