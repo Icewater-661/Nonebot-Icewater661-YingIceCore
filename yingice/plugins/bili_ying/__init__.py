@@ -354,6 +354,24 @@ async def _fetch_up_latest_video(uid: str, config: dict[str, Any]) -> dict[str, 
     return await asyncio.to_thread(_fetch_up_latest_video_sync, uid, config)
 
 
+def _fetch_up_name_sync(uid: str, config: dict[str, Any]) -> str:
+    request = _build_request(BILI_MASTER_API_URL, {"uid": uid}, config)
+    payload = _read_bili_payload(request)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise TypeError(API_ERROR)
+
+    info = data.get("info")
+    if not isinstance(info, dict) or not info.get("uname"):
+        raise TypeError(API_ERROR)
+
+    return str(info["uname"])
+
+
+async def _fetch_up_name(uid: str, config: dict[str, Any]) -> str:
+    return await asyncio.to_thread(_fetch_up_name_sync, uid, config)
+
+
 def _thumbnail_cover_url(cover_url: str) -> str:
     url = cover_url.strip()
     if not url:
@@ -376,7 +394,7 @@ def _video_message(video_info: dict[str, Any], fallback_bvid: str) -> Message:
     if isinstance(owner, dict) and owner.get("name"):
         up_name = str(owner["name"])
 
-    message = Message(f"视频名称：{title}\n网址：{_video_url(bvid)}\nUP主：{up_name}")
+    message = Message(f"视频名称：{title}\nBV号：{bvid}\nUP主：{up_name}")
     if cover_url:
         message += MessageSegment.text("\n")
         message += MessageSegment.image(file=cover_url, cache=False)
@@ -397,11 +415,23 @@ def _up_video_entry(uid: str, video_info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pending_up_video_entry(uid: str, uname: str | None = None) -> dict[str, Any]:
+    up_name = uname or f"UID {uid}"
+    return {
+        "uid": str(uid),
+        "uname": up_name,
+        "latest_bvid": "",
+        "latest_title": "等待首次检查",
+        "latest_pic": "",
+        "latest_created": 0,
+        "updated_at": int(time.time()),
+    }
+
+
 def _up_video_display(entry: dict[str, Any]) -> str:
     uid = str(entry.get("uid") or "")
     uname = str(entry.get("uname") or "未知 UP 主")
-    latest_title = str(entry.get("latest_title") or "暂无记录")
-    return f"{uid}：{uname}（最新：{latest_title}）"
+    return f"{uname}：UID {uid}"
 
 
 def _up_video_update_message(entry: dict[str, Any]) -> Message:
@@ -703,13 +733,24 @@ async def _add_room(group_id: int, room_id: str) -> str:
 
 async def _add_up_video(group_id: int, uid: str) -> str:
     config = _read_config()
-    video_info = await _fetch_up_latest_video(uid, config)
-    entry = _up_video_entry(uid, video_info)
+    try:
+        uname = await _fetch_up_name(uid, config)
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        uname = f"UID {uid}"
+
+    entry = _pending_up_video_entry(uid, uname)
     data = _read_subscriptions()
     block = _group_block(data, group_id)
     block["video_ups"][str(entry["uid"])] = entry
     _write_subscriptions(data)
-    return f"已添加 UP 主视频订阅：{_up_video_display(entry)}"
+    return f"已订阅up主：{uname}（{uid}）"
 
 
 def _remove_room(group_id: int, room_id: str) -> str:
@@ -785,7 +826,10 @@ async def _handle_live_command(
                     await _notify_cookie_invalid(bot, exc, argument)
                     result = "Bilibili Cookie 可能已失效，已提醒 bot 管理员。"
                 else:
-                    result = "直播订阅添加失败，请稍后再试。"
+                    result = (
+                        "直播订阅添加失败："
+                        f"{type(exc).__name__} {str(exc)[:80]}"
+                    )
     elif action in {"remove", "delete"}:
         if not argument or not argument.isdigit():
             result = "请提供正确的直播间号。"
@@ -796,7 +840,6 @@ async def _handle_live_command(
 
 
 async def _handle_video_command(
-    bot: Bot,
     group_id: int,
     action: str,
     argument: str | None,
@@ -814,21 +857,7 @@ async def _handle_video_command(
         if not uid or not uid.isdigit():
             result = "请提供正确的 UP 主 UID。"
         else:
-            try:
-                result = await _add_up_video(group_id, uid)
-            except (
-                HTTPError,
-                URLError,
-                TimeoutError,
-                TypeError,
-                ValueError,
-                json.JSONDecodeError,
-            ) as exc:
-                if _is_cookie_invalid_error(exc):
-                    await _notify_cookie_invalid(bot, exc, uid)
-                    result = "Bilibili Cookie 可能已失效，已提醒 bot 管理员。"
-                else:
-                    result = "UP 主视频订阅添加失败，请稍后再试。"
+            result = await _add_up_video(group_id, uid)
 
     return result
 
@@ -875,5 +904,5 @@ async def handle_bili_ying(bot: Bot, event: GroupMessageEvent) -> None:
         )
     if category == "video":
         await bili_ying.finish(
-            await _handle_video_command(bot, event.group_id, action, argument)
+            await _handle_video_command(event.group_id, action, argument)
         )
