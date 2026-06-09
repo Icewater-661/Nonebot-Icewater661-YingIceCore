@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import time
@@ -27,7 +28,8 @@ BILI_SUBSCRIPTION_FILE = Path(__file__).with_name("bili_ying_subscriptions.json"
 BILI_API_URL = "https://api.live.bilibili.com/room/v1/Room/get_info"
 BILI_MASTER_API_URL = "https://api.live.bilibili.com/live_user/v1/Master/info"
 BILI_VIDEO_API_URL = "https://api.bilibili.com/x/web-interface/view"
-BILI_UP_VIDEO_API_URL = "https://api.bilibili.com/x/space/arc/search"
+BILI_NAV_API_URL = "https://api.bilibili.com/x/web-interface/nav"
+BILI_UP_VIDEO_API_URL = "https://api.bilibili.com/x/space/wbi/arc/search"
 CHECK_INTERVAL_SECONDS = 120
 MIN_CHECK_INTERVAL_SECONDS = 60
 CHECK_BATCH_SIZE = 10
@@ -44,6 +46,72 @@ LIVE_STATUS_LIVE = 1
 LIVE_STATUS_ROUND = 2
 BV_PATTERN = re.compile(r"(?i)\bBV[0-9A-Za-z]{10}\b")
 URL_PATTERN = re.compile(r"https?://[^\s\]\)）>]+")
+MIXIN_KEY_ENC_TAB = [
+    46,
+    47,
+    18,
+    2,
+    53,
+    8,
+    23,
+    32,
+    15,
+    50,
+    10,
+    31,
+    58,
+    3,
+    45,
+    35,
+    27,
+    43,
+    5,
+    49,
+    33,
+    9,
+    42,
+    19,
+    29,
+    28,
+    14,
+    39,
+    12,
+    38,
+    41,
+    13,
+    37,
+    48,
+    7,
+    16,
+    24,
+    55,
+    40,
+    61,
+    26,
+    17,
+    0,
+    1,
+    60,
+    51,
+    30,
+    4,
+    22,
+    25,
+    54,
+    21,
+    56,
+    59,
+    6,
+    63,
+    57,
+    62,
+    11,
+    36,
+    20,
+    34,
+    44,
+    52,
+]
 DEFAULT_CONFIG = {
     "enabled": True,
     "cookie": "",
@@ -65,6 +133,7 @@ __plugin_meta__ = PluginMetadata(
 bili_ying = on_message(priority=10, block=False)
 bili_video = on_message(priority=11, block=False)
 _monitor_state: dict[str, asyncio.Task | None] = {"task": None}
+_wbi_key_cache: dict[str, str | int] = {"mixin_key": "", "expires_at": 0}
 
 
 def _ensure_json_file(path: Path, default_value: dict[str, Any]) -> None:
@@ -188,7 +257,13 @@ def _build_request(
     request = Request(
         f"{url}?{query}",
         headers={
-            "User-Agent": "Mozilla/5.0 YingIceCore bili-ying",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
             "Referer": "https://live.bilibili.com/",
         },
     )
@@ -197,6 +272,64 @@ def _build_request(
         request.add_header("Cookie", cookie)
 
     return request
+
+
+def _get_mixin_key(img_key: str, sub_key: str) -> str:
+    raw_key = img_key + sub_key
+    return "".join(raw_key[index] for index in MIXIN_KEY_ENC_TAB)[:32]
+
+
+def _filter_wbi_value(value: str) -> str:
+    return "".join(char for char in value if char not in "!'()*")
+
+
+def _fetch_wbi_mixin_key_sync(config: dict[str, Any]) -> str:
+    now = int(time.time())
+    cached_key = str(_wbi_key_cache.get("mixin_key") or "")
+    if cached_key and int(_wbi_key_cache.get("expires_at") or 0) > now:
+        return cached_key
+
+    request = _build_request(BILI_NAV_API_URL, {}, config)
+    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise TypeError(API_ERROR)
+
+    wbi_img = data.get("wbi_img")
+    if not isinstance(wbi_img, dict):
+        raise TypeError(API_ERROR)
+
+    img_url = str(wbi_img.get("img_url") or "")
+    sub_url = str(wbi_img.get("sub_url") or "")
+    img_key = img_url.rsplit("/", maxsplit=1)[-1].split(".", maxsplit=1)[0]
+    sub_key = sub_url.rsplit("/", maxsplit=1)[-1].split(".", maxsplit=1)[0]
+    if not img_key or not sub_key:
+        raise TypeError(API_ERROR)
+
+    mixin_key = _get_mixin_key(img_key, sub_key)
+    _wbi_key_cache["mixin_key"] = mixin_key
+    _wbi_key_cache["expires_at"] = now + 3600
+    return mixin_key
+
+
+def _build_wbi_request(
+    url: str,
+    query_data: dict[str, str],
+    config: dict[str, Any],
+    mixin_key: str | None = None,
+) -> Request:
+    params = query_data.copy()
+    params["wts"] = str(int(time.time()))
+    params = {
+        key: _filter_wbi_value(str(value))
+        for key, value in sorted(params.items(), key=lambda item: item[0])
+    }
+    query = urlencode(params)
+    current_mixin_key = mixin_key or _fetch_wbi_mixin_key_sync(config)
+    params["w_rid"] = hashlib.md5((query + current_mixin_key).encode()).hexdigest()
+    return _build_request(url, params, config)
 
 
 def _read_bili_payload(request: Request) -> dict[str, Any]:
@@ -319,17 +452,28 @@ async def _fetch_video_info(bvid: str, config: dict[str, Any]) -> dict[str, Any]
     return await asyncio.to_thread(_fetch_video_info_sync, bvid, config)
 
 
-def _fetch_up_latest_video_sync(uid: str, config: dict[str, Any]) -> dict[str, Any]:
-    request = _build_request(
+def _fetch_up_latest_video_sync(
+    uid: str,
+    config: dict[str, Any],
+    mixin_key: str | None = None,
+) -> dict[str, Any]:
+    request = _build_wbi_request(
         BILI_UP_VIDEO_API_URL,
         {
+            "keyword": "",
             "mid": uid,
+            "order": "pubdate",
+            "order_avoided": "true",
+            "platform": "web",
             "pn": "1",
             "ps": "1",
-            "order": "pubdate",
+            "tid": "0",
+            "web_location": "1550101",
         },
         config,
+        mixin_key,
     )
+    request.add_header("Referer", f"https://space.bilibili.com/{uid}/video")
     payload = _read_bili_payload(request)
     data = payload.get("data")
     if not isinstance(data, dict):
@@ -350,8 +494,12 @@ def _fetch_up_latest_video_sync(uid: str, config: dict[str, Any]) -> dict[str, A
     return latest_video
 
 
-async def _fetch_up_latest_video(uid: str, config: dict[str, Any]) -> dict[str, Any]:
-    return await asyncio.to_thread(_fetch_up_latest_video_sync, uid, config)
+async def _fetch_up_latest_video(
+    uid: str,
+    config: dict[str, Any],
+    mixin_key: str | None = None,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(_fetch_up_latest_video_sync, uid, config, mixin_key)
 
 
 def _fetch_up_name_sync(uid: str, config: dict[str, Any]) -> str:
@@ -637,15 +785,38 @@ async def _check_live_batch(
     return changed
 
 
+async def _prepare_wbi_mixin_key(bot: Bot, config: dict[str, Any]) -> str | None:
+    try:
+        return await asyncio.to_thread(_fetch_wbi_mixin_key_sync, config)
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        if _is_cookie_invalid_error(exc):
+            await _notify_cookie_invalid(bot, exc, "WBI key")
+        return None
+
+
 async def _check_up_video_batch(
     bot: Bot,
     batch: list[tuple[str, list[tuple[str, dict[str, Any], dict[str, Any]]]]],
     config: dict[str, Any],
 ) -> bool:
+    if not batch:
+        return False
+
     changed = False
+    mixin_key = await _prepare_wbi_mixin_key(bot, config)
+    if not mixin_key:
+        return False
+
     for uid, group_entries in batch:
         try:
-            video_info = await _fetch_up_latest_video(str(uid), config)
+            video_info = await _fetch_up_latest_video(str(uid), config, mixin_key)
         except (
             HTTPError,
             URLError,
