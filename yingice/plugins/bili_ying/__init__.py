@@ -463,7 +463,6 @@ def _fetch_up_latest_video_sync(
             "keyword": "",
             "mid": uid,
             "order": "pubdate",
-            "order_avoided": "true",
             "platform": "web",
             "pn": "1",
             "ps": "1",
@@ -565,6 +564,7 @@ def _up_video_entry(uid: str, video_info: dict[str, Any]) -> dict[str, Any]:
 
 def _pending_up_video_entry(uid: str, uname: str | None = None) -> dict[str, Any]:
     up_name = uname or f"UID {uid}"
+    now = int(time.time())
     return {
         "uid": str(uid),
         "uname": up_name,
@@ -572,7 +572,8 @@ def _pending_up_video_entry(uid: str, uname: str | None = None) -> dict[str, Any
         "latest_title": "等待首次检查",
         "latest_pic": "",
         "latest_created": 0,
-        "updated_at": int(time.time()),
+        "subscribed_at": now,
+        "updated_at": now,
     }
 
 
@@ -593,6 +594,30 @@ def _up_video_update_message(entry: dict[str, Any]) -> Message:
         message += MessageSegment.image(file=cover_url, cache=False)
 
     return message
+
+
+def _up_video_update_action(
+    old_entry: dict[str, Any],
+    new_entry: dict[str, Any],
+) -> str:
+    old_bvid = str(old_entry.get("latest_bvid") or "")
+    old_created = int(old_entry.get("latest_created") or 0)
+    new_bvid = str(new_entry.get("latest_bvid") or "")
+    new_created = int(new_entry.get("latest_created") or 0)
+    subscribed_at = int(
+        old_entry.get("subscribed_at") or old_entry.get("updated_at") or 0
+    )
+    new_entry["subscribed_at"] = subscribed_at
+
+    if not new_bvid:
+        return "ignore"
+    if old_created <= 0:
+        return "push" if new_created > subscribed_at else "store"
+    if new_created > old_created:
+        return "push"
+    if new_created < old_created or (old_bvid and old_bvid != new_bvid):
+        return "ignore"
+    return "store"
 
 
 def _is_cookie_invalid_error(error: BaseException) -> bool:
@@ -830,14 +855,14 @@ async def _check_up_video_batch(
             continue
 
         new_entry = _up_video_entry(str(uid), video_info)
-        new_bvid = str(new_entry.get("latest_bvid") or "")
-        if not new_bvid:
-            continue
         for group_id, video_ups, entry in group_entries:
-            old_bvid = str(entry.get("latest_bvid") or "")
+            action = _up_video_update_action(entry, new_entry)
+            if action == "ignore":
+                continue
+
             video_ups[str(uid)] = new_entry
             changed = True
-            if not old_bvid or old_bvid == new_bvid:
+            if action != "push":
                 continue
             try:
                 await bot.send_group_msg(
