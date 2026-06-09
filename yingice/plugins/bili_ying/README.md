@@ -4,23 +4,16 @@
 
 Bilibili 直播订阅、UP 主视频更新订阅与视频信息解析插件。群管理员或 bot 管理员可以为当前群添加直播间订阅或 UP 主视频订阅，插件会定时检查直播间状态与 UP 主最新视频，并在开播、下播或视频更新时向群聊发送提醒。群内发送 Bilibili 视频链接或 BV 号时，插件会自动回复视频名称、视频网址、UP 主与视频封面小图。
 
-提醒表头格式为：
 
-```text
-主播名称 开播啦！
-主播名称 下播啦！
-```
 
 ## 指令说明
 
 @bot bili live add 直播间号：添加当前群直播订阅
-@bot bili live remove 直播间号：删除当前群直播订阅
-@bot bili live delete 直播间号：删除当前群直播订阅
+@bot bili live remove/delete 直播间号：删除当前群直播订阅
 @bot bili live list：展示当前群所有直播订阅
 @bot bili video UP主UID：添加当前群 UP 主视频更新订阅
 @bot bili video add UP主UID：添加当前群 UP 主视频更新订阅
-@bot bili video remove UP主UID：删除当前群 UP 主视频更新订阅
-@bot bili video delete UP主UID：删除当前群 UP 主视频更新订阅
+@bot bili video remove/delete UP主UID：删除当前群 UP 主视频更新订阅
 @bot bili video list：展示当前群所有 UP 主视频更新订阅
 Bilibili 视频链接或 BV号：自动解析视频名称、视频网址、UP主与封面小图
 
