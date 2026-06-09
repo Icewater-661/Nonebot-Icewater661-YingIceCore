@@ -27,15 +27,18 @@ BILI_SUBSCRIPTION_FILE = Path(__file__).with_name("bili_ying_subscriptions.json"
 BILI_API_URL = "https://api.live.bilibili.com/room/v1/Room/get_info"
 BILI_MASTER_API_URL = "https://api.live.bilibili.com/live_user/v1/Master/info"
 BILI_VIDEO_API_URL = "https://api.bilibili.com/x/web-interface/view"
+BILI_UP_VIDEO_API_URL = "https://api.bilibili.com/x/space/arc/search"
 CHECK_INTERVAL_SECONDS = 120
 MIN_CHECK_INTERVAL_SECONDS = 60
 CHECK_BATCH_SIZE = 10
 REQUEST_TIMEOUT_SECONDS = 10
-API_RESET_NOTICE_COOLDOWN_SECONDS = 3600
 API_ERROR = "api error"
 ROOM_DATA_ERROR = "room data error"
+COOKIE_INVALID_NOTICE_COOLDOWN_SECONDS = 3600
 COMMAND_PREFIX = "bili"
 COMMAND_PARTS_MIN = 2
+COMMAND_ACTION_INDEX = 2
+COMMAND_ARGUMENT_INDEX = 3
 LIVE_STATUS_OFFLINE = 0
 LIVE_STATUS_LIVE = 1
 LIVE_STATUS_ROUND = 2
@@ -47,14 +50,16 @@ DEFAULT_CONFIG = {
     "check_interval_seconds": CHECK_INTERVAL_SECONDS,
     "check_batch_size": CHECK_BATCH_SIZE,
     "check_cursor": 0,
+    "video_check_cursor": 0,
     "notify_admin_on_api_reset": True,
     "last_api_reset_notice_at": 0,
+    "last_cookie_invalid_notice_at": 0,
 }
 
 __plugin_meta__ = PluginMetadata(
     name="bili-ying",
-    description="Bilibili 直播订阅提醒",
-    usage="@bot bili add/remove/delete/list",
+    description="Bilibili 直播订阅提醒与视频更新提醒",
+    usage="@bot bili live add/remove/delete/list | @bot bili video UID",
 )
 
 bili_ying = on_message(priority=10, block=False)
@@ -127,14 +132,23 @@ def _is_bili_admin(event: MessageEvent) -> bool:
     return is_master_event(event) or _is_group_admin(event)
 
 
-def _parse_command(text: str) -> tuple[str, str | None] | None:
-    parts = text.strip().split(maxsplit=2)
+def _parse_command(text: str) -> tuple[str, str, str | None] | None:
+    parts = text.strip().split(maxsplit=3)
     if len(parts) < COMMAND_PARTS_MIN or parts[0].lower() != COMMAND_PREFIX:
         return None
 
-    action = parts[1].lower()
-    argument = parts[2].strip() if len(parts) > COMMAND_PARTS_MIN else None
-    return action, argument
+    category = parts[1].lower()
+    action = (
+        parts[COMMAND_ACTION_INDEX].lower()
+        if len(parts) > COMMAND_ACTION_INDEX
+        else ""
+    )
+    argument = (
+        parts[COMMAND_ARGUMENT_INDEX].strip()
+        if len(parts) > COMMAND_ARGUMENT_INDEX
+        else None
+    )
+    return category, action, argument
 
 
 def _group_block(data: dict[str, Any], group_id: int | str) -> dict[str, Any]:
@@ -143,6 +157,8 @@ def _group_block(data: dict[str, Any], group_id: int | str) -> dict[str, Any]:
         data[key] = {"rooms": {}}
     if "rooms" not in data[key] or not isinstance(data[key]["rooms"], dict):
         data[key]["rooms"] = {}
+    if "video_ups" not in data[key] or not isinstance(data[key]["video_ups"], dict):
+        data[key]["video_ups"] = {}
 
     return data[key]
 
@@ -157,6 +173,10 @@ def _status_text(status: int) -> str:
 
 def _room_url(room_id: str | int) -> str:
     return f"https://live.bilibili.com/{room_id}"
+
+
+def _video_url(bvid: str) -> str:
+    return f"https://www.bilibili.com/video/{bvid}"
 
 
 def _build_request(
@@ -299,6 +319,41 @@ async def _fetch_video_info(bvid: str, config: dict[str, Any]) -> dict[str, Any]
     return await asyncio.to_thread(_fetch_video_info_sync, bvid, config)
 
 
+def _fetch_up_latest_video_sync(uid: str, config: dict[str, Any]) -> dict[str, Any]:
+    request = _build_request(
+        BILI_UP_VIDEO_API_URL,
+        {
+            "mid": uid,
+            "pn": "1",
+            "ps": "1",
+            "order": "pubdate",
+        },
+        config,
+    )
+    payload = _read_bili_payload(request)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise TypeError(API_ERROR)
+
+    video_list = data.get("list")
+    if not isinstance(video_list, dict):
+        raise TypeError(API_ERROR)
+
+    videos = video_list.get("vlist")
+    if not isinstance(videos, list) or not videos:
+        raise ValueError("未获取到该 UP 主的视频。")  # noqa: TRY003
+
+    latest_video = videos[0]
+    if not isinstance(latest_video, dict):
+        raise TypeError(API_ERROR)
+
+    return latest_video
+
+
+async def _fetch_up_latest_video(uid: str, config: dict[str, Any]) -> dict[str, Any]:
+    return await asyncio.to_thread(_fetch_up_latest_video_sync, uid, config)
+
+
 def _thumbnail_cover_url(cover_url: str) -> str:
     url = cover_url.strip()
     if not url:
@@ -321,7 +376,7 @@ def _video_message(video_info: dict[str, Any], fallback_bvid: str) -> Message:
     if isinstance(owner, dict) and owner.get("name"):
         up_name = str(owner["name"])
 
-    message = Message(f"视频名称：{title}\nBV号：{bvid}\nUP主：{up_name}")
+    message = Message(f"视频名称：{title}\n网址：{_video_url(bvid)}\nUP主：{up_name}")
     if cover_url:
         message += MessageSegment.text("\n")
         message += MessageSegment.image(file=cover_url, cache=False)
@@ -329,23 +384,65 @@ def _video_message(video_info: dict[str, Any], fallback_bvid: str) -> Message:
     return message
 
 
-def _is_api_reset_error(error: BaseException) -> bool:
-    if isinstance(error, HTTPError):
-        return error.code in {403, 412, 429}
-    if isinstance(error, URLError):
-        return "10054" in str(error.reason) or "ConnectionReset" in str(error.reason)
+def _up_video_entry(uid: str, video_info: dict[str, Any]) -> dict[str, Any]:
+    bvid = str(video_info.get("bvid") or "")
+    return {
+        "uid": str(uid),
+        "uname": str(video_info.get("author") or "未知 UP 主"),
+        "latest_bvid": bvid,
+        "latest_title": str(video_info.get("title") or "未知标题"),
+        "latest_pic": str(video_info.get("pic") or ""),
+        "latest_created": int(video_info.get("created") or 0),
+        "updated_at": int(time.time()),
+    }
 
-    return False
+
+def _up_video_display(entry: dict[str, Any]) -> str:
+    uid = str(entry.get("uid") or "")
+    uname = str(entry.get("uname") or "未知 UP 主")
+    latest_title = str(entry.get("latest_title") or "暂无记录")
+    return f"{uid}：{uname}（最新：{latest_title}）"
 
 
-async def _notify_api_reset(bot: Bot, error: BaseException, room_id: str) -> None:
+def _up_video_update_message(entry: dict[str, Any]) -> Message:
+    bvid = str(entry.get("latest_bvid") or "")
+    uname = str(entry.get("uname") or "未知 UP 主")
+    title = str(entry.get("latest_title") or "未知标题")
+    cover_url = _thumbnail_cover_url(str(entry.get("latest_pic") or ""))
+    message = Message(f"{uname} 更新了新视频！\n{title}\n{_video_url(bvid)}")
+    if cover_url:
+        message += MessageSegment.text("\n")
+        message += MessageSegment.image(file=cover_url, cache=False)
+
+    return message
+
+
+def _is_cookie_invalid_error(error: BaseException) -> bool:
+    if not isinstance(error, ValueError):
+        return False
+
+    message = str(error).lower()
+    return any(
+        keyword in message
+        for keyword in (
+            "未登录",
+            "账号未登录",
+            "not login",
+            "not logged in",
+            "cookie",
+            "sessdata",
+        )
+    )
+
+
+async def _notify_cookie_invalid(bot: Bot, error: BaseException, target: str) -> None:
     config = _read_config()
     if not bool(config.get("notify_admin_on_api_reset", True)):
         return
 
     now = int(time.time())
-    last_notice_at = int(config.get("last_api_reset_notice_at", 0))
-    if now - last_notice_at < API_RESET_NOTICE_COOLDOWN_SECONDS:
+    last_notice_at = int(config.get("last_cookie_invalid_notice_at", 0))
+    if now - last_notice_at < COOKIE_INVALID_NOTICE_COOLDOWN_SECONDS:
         return
 
     from yingice.plugins.ying_permission import get_permission_config
@@ -355,16 +452,17 @@ async def _notify_api_reset(bot: Bot, error: BaseException, room_id: str) -> Non
         return
 
     message = (
-        "bili-ying 检测到 Bilibili API 访问疑似被风控/重置。\n"
-        f"直播间：{room_id}\n"
+        "bili-ying 检测到 Bilibili Cookie 可能已失效。\n"
+        f"目标：{target}\n"
         f"错误：{error}\n"
-        "可尝试在 bili_ying_config.json 的 cookie 字段补入可用登录 Cookie。"
+        "请在本地重新运行 yingice/plugins/bili_ying/login_bilibili_cookie.py "
+        "获取并写入新的 Cookie。"
     )
     for admin_id in admin_ids:
         with contextlib.suppress(ActionFailed):
             await bot.send_private_msg(user_id=int(admin_id), message=message)
 
-    config["last_api_reset_notice_at"] = now
+    config["last_cookie_invalid_notice_at"] = now
     _write_config(config)
 
 
@@ -423,6 +521,24 @@ def _build_room_targets(
     return sorted(targets.items(), key=lambda item: item[0])
 
 
+def _build_up_targets(
+    subscriptions: dict[str, Any],
+) -> list[tuple[str, list[tuple[str, dict[str, Any], dict[str, Any]]]]]:
+    targets: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    for group_id, block in subscriptions.items():
+        if not isinstance(block, dict):
+            continue
+        video_ups = block.get("video_ups", {})
+        if not isinstance(video_ups, dict):
+            continue
+        for uid, entry in video_ups.items():
+            if not isinstance(entry, dict):
+                continue
+            targets.setdefault(str(uid), []).append((str(group_id), video_ups, entry))
+
+    return sorted(targets.items(), key=lambda item: item[0])
+
+
 def _select_room_batch(
     targets: list[tuple[str, list[tuple[str, dict[str, Any], dict[str, Any]]]]],
     config: dict[str, Any],
@@ -437,22 +553,25 @@ def _select_room_batch(
     return batch[: len(targets)], next_cursor
 
 
-async def _check_once() -> None:  # noqa: C901
-    config = _read_config()
-    if not bool(config.get("enabled", True)):
-        return
+def _select_up_batch(
+    targets: list[tuple[str, list[tuple[str, dict[str, Any], dict[str, Any]]]]],
+    config: dict[str, Any],
+) -> tuple[list[tuple[str, list[tuple[str, dict[str, Any], dict[str, Any]]]]], int]:
+    if not targets:
+        return [], 0
 
-    bots = get_bots()
-    if not bots:
-        return
+    batch_size = max(int(config.get("check_batch_size", CHECK_BATCH_SIZE)), 1)
+    cursor = int(config.get("video_check_cursor", 0)) % len(targets)
+    batch = [targets[(cursor + offset) % len(targets)] for offset in range(batch_size)]
+    next_cursor = (cursor + min(batch_size, len(targets))) % len(targets)
+    return batch[: len(targets)], next_cursor
 
-    bot = next(iter(bots.values()))
-    subscriptions = _read_subscriptions()
-    targets = _build_room_targets(subscriptions)
-    batch, next_cursor = _select_room_batch(targets, config)
-    config["check_cursor"] = next_cursor
-    _write_config(config)
 
+async def _check_live_batch(
+    bot: Bot,
+    batch: list[tuple[str, list[tuple[str, dict[str, Any], dict[str, Any]]]]],
+    config: dict[str, Any],
+) -> bool:
     changed = False
     for room_id, group_entries in batch:
         try:
@@ -465,8 +584,8 @@ async def _check_once() -> None:  # noqa: C901
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-            if _is_api_reset_error(exc):
-                await _notify_api_reset(bot, exc, str(room_id))
+            if _is_cookie_invalid_error(exc):
+                await _notify_cookie_invalid(bot, exc, str(room_id))
             continue
 
         new_entry = _room_entry(str(room_id), room_info)
@@ -484,6 +603,73 @@ async def _check_once() -> None:  # noqa: C901
                 await bot.send_group_msg(group_id=int(group_id), message=message)
             except ActionFailed:
                 continue
+
+    return changed
+
+
+async def _check_up_video_batch(
+    bot: Bot,
+    batch: list[tuple[str, list[tuple[str, dict[str, Any], dict[str, Any]]]]],
+    config: dict[str, Any],
+) -> bool:
+    changed = False
+    for uid, group_entries in batch:
+        try:
+            video_info = await _fetch_up_latest_video(str(uid), config)
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            if _is_cookie_invalid_error(exc):
+                await _notify_cookie_invalid(bot, exc, str(uid))
+            continue
+
+        new_entry = _up_video_entry(str(uid), video_info)
+        new_bvid = str(new_entry.get("latest_bvid") or "")
+        if not new_bvid:
+            continue
+        for group_id, video_ups, entry in group_entries:
+            old_bvid = str(entry.get("latest_bvid") or "")
+            video_ups[str(uid)] = new_entry
+            changed = True
+            if not old_bvid or old_bvid == new_bvid:
+                continue
+            try:
+                await bot.send_group_msg(
+                    group_id=int(group_id),
+                    message=_up_video_update_message(new_entry),
+                )
+            except ActionFailed:
+                continue
+
+    return changed
+
+
+async def _check_once() -> None:
+    config = _read_config()
+    if not bool(config.get("enabled", True)):
+        return
+
+    bots = get_bots()
+    if not bots:
+        return
+
+    bot = next(iter(bots.values()))
+    subscriptions = _read_subscriptions()
+    targets = _build_room_targets(subscriptions)
+    batch, next_cursor = _select_room_batch(targets, config)
+    up_targets = _build_up_targets(subscriptions)
+    up_batch, video_next_cursor = _select_up_batch(up_targets, config)
+    config["check_cursor"] = next_cursor
+    config["video_check_cursor"] = video_next_cursor
+    _write_config(config)
+
+    changed = await _check_live_batch(bot, batch, config)
+    changed = await _check_up_video_batch(bot, up_batch, config) or changed
 
     if changed:
         _write_subscriptions(subscriptions)
@@ -515,6 +701,17 @@ async def _add_room(group_id: int, room_id: str) -> str:
     return f"已添加直播订阅：{_room_display(entry)}"
 
 
+async def _add_up_video(group_id: int, uid: str) -> str:
+    config = _read_config()
+    video_info = await _fetch_up_latest_video(uid, config)
+    entry = _up_video_entry(uid, video_info)
+    data = _read_subscriptions()
+    block = _group_block(data, group_id)
+    block["video_ups"][str(entry["uid"])] = entry
+    _write_subscriptions(data)
+    return f"已添加 UP 主视频订阅：{_up_video_display(entry)}"
+
+
 def _remove_room(group_id: int, room_id: str) -> str:
     data = _read_subscriptions()
     block = _group_block(data, group_id)
@@ -524,6 +721,17 @@ def _remove_room(group_id: int, room_id: str) -> str:
 
     _write_subscriptions(data)
     return f"已删除直播订阅：{_room_display(removed)}"
+
+
+def _remove_up_video(group_id: int, uid: str) -> str:
+    data = _read_subscriptions()
+    block = _group_block(data, group_id)
+    removed = block["video_ups"].pop(str(uid), None)
+    if removed is None:
+        return f"当前群未订阅 UP 主：{uid}"
+
+    _write_subscriptions(data)
+    return f"已删除 UP 主视频订阅：{_up_video_display(removed)}"
 
 
 def _list_rooms(group_id: int) -> str:
@@ -536,6 +744,93 @@ def _list_rooms(group_id: int) -> str:
     lines = ["当前群 Bilibili 直播订阅："]
     lines.extend(_room_display(entry) for entry in rooms.values())
     return "\n".join(lines)
+
+
+def _list_up_videos(group_id: int) -> str:
+    data = _read_subscriptions()
+    block = _group_block(data, group_id)
+    video_ups = block["video_ups"]
+    if not video_ups:
+        return "当前群暂无 Bilibili UP 主视频订阅。"
+
+    lines = ["当前群 Bilibili UP 主视频订阅："]
+    lines.extend(_up_video_display(entry) for entry in video_ups.values())
+    return "\n".join(lines)
+
+
+async def _handle_live_command(
+    bot: Bot,
+    group_id: int,
+    action: str,
+    argument: str | None,
+) -> str:
+    result = "请使用 bili live add/remove/delete/list。"
+    if action == "list":
+        result = _list_rooms(group_id)
+    elif action == "add":
+        if not argument or not argument.isdigit():
+            result = "请提供正确的直播间号。"
+        else:
+            try:
+                result = await _add_room(group_id, argument)
+            except (
+                HTTPError,
+                URLError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
+                if _is_cookie_invalid_error(exc):
+                    await _notify_cookie_invalid(bot, exc, argument)
+                    result = "Bilibili Cookie 可能已失效，已提醒 bot 管理员。"
+                else:
+                    result = "直播订阅添加失败，请稍后再试。"
+    elif action in {"remove", "delete"}:
+        if not argument or not argument.isdigit():
+            result = "请提供正确的直播间号。"
+        else:
+            result = _remove_room(group_id, argument)
+
+    return result
+
+
+async def _handle_video_command(
+    bot: Bot,
+    group_id: int,
+    action: str,
+    argument: str | None,
+) -> str:
+    result = ""
+    if action == "list":
+        result = _list_up_videos(group_id)
+    elif action in {"remove", "delete"}:
+        if not argument or not argument.isdigit():
+            result = "请提供正确的 UP 主 UID。"
+        else:
+            result = _remove_up_video(group_id, argument)
+    else:
+        uid = argument if action == "add" else action
+        if not uid or not uid.isdigit():
+            result = "请提供正确的 UP 主 UID。"
+        else:
+            try:
+                result = await _add_up_video(group_id, uid)
+            except (
+                HTTPError,
+                URLError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
+                if _is_cookie_invalid_error(exc):
+                    await _notify_cookie_invalid(bot, exc, uid)
+                    result = "Bilibili Cookie 可能已失效，已提醒 bot 管理员。"
+                else:
+                    result = "UP 主视频订阅添加失败，请稍后再试。"
+
+    return result
 
 
 @bili_video.handle()
@@ -555,8 +850,8 @@ async def handle_bili_video(bot: Bot, event: GroupMessageEvent) -> None:
         ValueError,
         json.JSONDecodeError,
     ) as exc:
-        if _is_api_reset_error(exc):
-            await _notify_api_reset(bot, exc, bvid)
+        if _is_cookie_invalid_error(exc):
+            await _notify_cookie_invalid(bot, exc, bvid)
         return
 
     await bili_video.finish(_video_message(video_info, bvid))
@@ -573,24 +868,12 @@ async def handle_bili_ying(bot: Bot, event: GroupMessageEvent) -> None:
     if command is None:
         return
 
-    action, argument = command
-    if action == "list":
-        await bili_ying.finish(_list_rooms(event.group_id))
-    if action == "add":
-        if not argument or not argument.isdigit():
-            await bili_ying.finish("请提供正确的直播间号。")
-        try:
-            await bili_ying.finish(await _add_room(event.group_id, argument))
-        except (
-            HTTPError,
-            URLError,
-            TimeoutError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            await bili_ying.finish(f"直播间信息获取失败：{exc}")
-    if action in {"remove", "delete"}:
-        if not argument or not argument.isdigit():
-            await bili_ying.finish("请提供正确的直播间号。")
-        await bili_ying.finish(_remove_room(event.group_id, argument))
+    category, action, argument = command
+    if category == "live":
+        await bili_ying.finish(
+            await _handle_live_command(bot, event.group_id, action, argument)
+        )
+    if category == "video":
+        await bili_ying.finish(
+            await _handle_video_command(bot, event.group_id, action, argument)
+        )
